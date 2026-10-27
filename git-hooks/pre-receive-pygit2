@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+"""YaPOC pre-receive hook implemented with pygit2.
+
+This hook uses pygit2 to inspect incoming commits and trees directly
+in Python memory, eliminating subprocess overhead for git log invocations.
+It respects Git's quarantine object environment during push verification.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import re
+import sys
+
+import pygit2
+
+# Forbidden patterns matching blocked files or directories
+BLOCKED_PATTERNS = [
+    r"(^|/)\.osc(/|$)",
+    r"\.forbidden_file_name$",
+]
+
+ZERO_COMMIT = "0000000000000000000000000000000000000000"
+EMPTY_TREE_SHA1 = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
+def get_sort_topological() -> int:
+    """Return topological sort flag compatible across pygit2 versions.
+
+    Handles enum migration in pygit2 while preserving backwards compatibility.
+    """
+    enum_sort = getattr(getattr(pygit2, "enums", None), "SortMode", None)
+    if enum_sort is not None and hasattr(enum_sort, "TOPOLOGICAL"):
+        return enum_sort.TOPOLOGICAL
+    return getattr(pygit2, "GIT_SORT_TOPOLOGICAL", 1)
+
+
+def open_repository() -> pygit2.Repository:
+    """Open git repository with object quarantine directories registered.
+
+    Git isolates incoming objects during pre-receive in GIT_OBJECT_DIRECTORY.
+    We attach quarantine and alternate object directories to the ODB so
+    quarantined objects can be resolved.
+    """
+    git_dir = os.environ.get("GIT_DIR", ".")
+    git_dir_path = Path(git_dir).resolve()
+
+    # Look for FROM_ENV open flag in pygit2.enums or module root
+    open_flag = getattr(
+        getattr(pygit2, "enums", None),
+        "RepositoryOpenFlag",
+        None,
+    )
+    from_env = (
+        getattr(open_flag, "FROM_ENV", None)
+        if open_flag is not None
+        else getattr(pygit2, "GIT_REPOSITORY_OPEN_FROM_ENV", None)
+    )
+
+    repo: pygit2.Repository | None = None
+    if from_env is not None:
+        try:
+            repo = pygit2.Repository(str(git_dir_path), flags=from_env)
+        except Exception:
+            pass
+
+    if repo is None:
+        repo = pygit2.Repository(str(git_dir_path))
+
+    # Resolve quarantine directory relative to GIT_DIR if needed
+    quarantine_dir = os.environ.get("GIT_OBJECT_DIRECTORY")
+    if quarantine_dir:
+        q_path = Path(quarantine_dir)
+        if not q_path.is_absolute():
+            q_path = (git_dir_path / q_path).resolve()
+        if q_path.is_dir():
+            try:
+                repo.odb.add_disk_alternate(str(q_path))
+            except Exception:
+                pass
+
+    # Resolve alternate object directories
+    alternate_dirs = os.environ.get("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+    if alternate_dirs:
+        for alt in alternate_dirs.split(os.pathsep):
+            if alt.strip():
+                alt_path = Path(alt.strip())
+                if not alt_path.is_absolute():
+                    alt_path = (git_dir_path / alt_path).resolve()
+                if alt_path.is_dir():
+                    try:
+                        repo.odb.add_disk_alternate(str(alt_path))
+                    except Exception:
+                        pass
+    else:
+        # Fallback to standard objects directory if alternates not defined
+        def_obj = git_dir_path / "objects"
+        if def_obj.is_dir():
+            try:
+                repo.odb.add_disk_alternate(str(def_obj))
+            except Exception:
+                pass
+
+    return repo
+
+
+def get_empty_tree(repo: pygit2.Repository) -> pygit2.Tree:
+    """Retrieve or create an empty Tree object in the repository ODB.
+
+    Used as the comparison baseline for root commits with no parents.
+    """
+    try:
+        empty_oid = repo.TreeBuilder().write()
+        return repo[empty_oid]
+    except Exception:
+        return repo[EMPTY_TREE_SHA1]
+
+
+def get_changed_files(
+    repo: pygit2.Repository,
+    oldrev: str,
+    newrev: str,
+) -> set[str] | None:
+    """Retrieve all changed or added file paths in the pushed range.
+
+    Returns a set of file paths, or None if the incoming commit could
+    not be resolved (fail closed).
+    """
+    if newrev == ZERO_COMMIT:
+        # Branch deletion; no new files introduced
+        return set()
+
+    # Look up commit by direct OID from object database
+    new_commit = None
+    try:
+        new_commit = repo[newrev]
+    except KeyError:
+        try:
+            new_commit = repo.revparse_single(newrev)
+        except Exception:
+            pass
+
+    if new_commit is None:
+        print(
+            f"[HOOK ERROR] Cannot resolve commit {newrev}",
+            file=sys.stderr,
+        )
+        return None
+
+    changed_files: set[str] = set()
+    walker = repo.walk(new_commit.id, get_sort_topological())
+
+    if oldrev != ZERO_COMMIT:
+        # Existing branch: hide oldrev and all historical ancestors
+        old_commit = None
+        try:
+            old_commit = repo[oldrev]
+        except KeyError:
+            try:
+                old_commit = repo.revparse_single(oldrev)
+            except Exception:
+                pass
+        if old_commit is not None:
+            try:
+                walker.hide(old_commit.id)
+            except Exception:
+                pass
+    else:
+        # New branch: hide commits reachable from existing references
+        for ref_name in repo.references:
+            try:
+                ref = repo.lookup_reference(ref_name)
+                target = ref.target
+                oid = (
+                    target
+                    if isinstance(target, pygit2.Oid)
+                    else getattr(target, "id", None)
+                )
+                if oid is not None and oid != new_commit.id:
+                    walker.hide(oid)
+            except Exception:
+                pass
+
+    empty_tree = get_empty_tree(repo)
+
+    for commit in walker:
+        # Diff against parent tree or against an empty tree for root commits
+        parent_tree = (
+            commit.parents[0].tree if commit.parents else empty_tree
+        )
+        diff = parent_tree.diff_to_tree(commit.tree)
+
+        for delta in diff.deltas:
+            # Ignore file deletions ('D'); only inspect added/modified files
+            if delta.status_char() != "D":
+                changed_files.add(delta.new_file.path)
+
+    return changed_files
+
+
+def main() -> None:
+    """Read pushed refs from stdin and reject forbidden file patterns."""
+    repo = open_repository()
+    compiled_patterns = [re.compile(p) for p in BLOCKED_PATTERNS]
+    exit_code = 0
+
+    # Git passes oldrev, newrev, and refname via standard input
+    for line in sys.stdin:
+        parts = line.strip().split()
+        if len(parts) < 3:
+            continue
+        oldrev, newrev, _refname = parts[0], parts[1], parts[2]
+
+        changed_files = get_changed_files(repo, oldrev, newrev)
+        # Fail closed: reject push if objects cannot be resolved
+        if changed_files is None:
+            print(
+                f"[PUSH REJECTED] Failed to inspect incoming commit {newrev}",
+                file=sys.stderr,
+            )
+            exit_code = 1
+            continue
+
+        for file_path in changed_files:
+            for pattern in compiled_patterns:
+                if pattern.search(file_path):
+                    # Output error directly to stderr for developer feedback
+                    print(
+                        f"[PUSH REJECTED] The file '{file_path}' matches "
+                        f"blocked pattern: {pattern.pattern}",
+                        file=sys.stderr,
+                    )
+                    exit_code = 1
+
+    sys.exit(exit_code)
+
+
+if __name__ == "__main__":
+    main()

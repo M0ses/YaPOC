@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+import sys
+import subprocess
+import re
+
+# List of forbidden file names (defined as regular expressions)
+# This example blocks exactly "secret.txt", any ".env" file, and all ".exe" files
+BLOCKED_PATTERNS = [
+    r"(^|/)\.osc(/|$)",
+    r"\.forbidden_file_name$"
+]
+
+ZERO_COMMIT = "0000000000000000000000000000000000000000"
+
+def get_changed_files(oldrev, newrev):
+    """Retrieves all changed or added files within the pushed commit range."""
+    if newrev == ZERO_COMMIT:
+        return []  # Branch deleted
+    
+    if oldrev == ZERO_COMMIT:
+        # New branch: Compare against all other existing branches
+        cmd = ["git", "log", newrev, "--name-only", "--pretty=format:", "--not", "--all", "--not", newrev]
+    else:
+        # Existing branch: Normal diff range
+        cmd = ["git", "log", f"{oldrev}..{newrev}", "--name-only", "--pretty=format:"]
+    
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        # Filter out empty lines and remove duplicates using a set
+        files = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+        return list(files)
+    except subprocess.CalledProcessError:
+        return []
+
+def main():
+    exit_code = 0
+    # Compile the regex patterns for better performance
+    compiled_patterns = [re.compile(p) for p in BLOCKED_PATTERNS]
+
+    # Git passes old ref, new ref, and the branch name via standard input (stdin)
+    for line in sys.stdin:
+        parts = line.strip().split()
+        print(f"parts: {parts}")
+        if len(parts) < 3:
+            continue
+        oldrev, newrev, refname = parts[0], parts[1], parts[2]
+        
+        # Get changed files for this specific reference
+        changed_files = get_changed_files(oldrev, newrev)
+        print(f"changed_files: {changed_files}") 
+        # Check each file against the blocked patterns
+        for file in changed_files:
+            for pattern in compiled_patterns:
+                if pattern.search(file):
+                    # Print to stderr so the developer sees it directly in their terminal
+                    print(f"[PUSH REJECTED] The file '{file}' matches blocked pattern: {pattern.pattern}", file=sys.stderr)
+                    exit_code = 1
+
+    sys.exit(exit_code)
+
+if __name__ == "__main__":
+    main()
+
