@@ -186,11 +186,11 @@ class TestYaPOCGitHooks(unittest.TestCase):
         # Ensure working tree was cleaned after rejection
         self.assertEqual(self.repo.git.status("--short").strip(), "")
 
-    def test_02_reject_forbidden_file_name(self) -> None:
-        """Test that committing .forbidden_file_name is rejected."""
-        (WORKING_COPY_PATH / ".forbidden_file_name").touch()
+    def test_02_reject_obsinfo_file(self) -> None:
+        """Test that committing a file with .obsinfo suffix is rejected."""
+        (WORKING_COPY_PATH / "package.obsinfo").touch()
 
-        tc_name = "add forbidden file name"
+        tc_name = "add file with .obsinfo suffix"
         # Push should be rejected by pre-receive hook and discarded
         success, output = wgit_commit(
             self.repo,
@@ -199,18 +199,19 @@ class TestYaPOCGitHooks(unittest.TestCase):
         )
         self.assertFalse(
             success,
-            f"Expected push rejection, but push succeeded: {output}",
+            f"Expected push rejection for .obsinfo, but push succeeded: "
+            f"{output}",
         )
         # Ensure working tree was cleaned after rejection
         self.assertEqual(self.repo.git.status("--short").strip(), "")
 
-    def test_03_reject_forbidden_file_name_in_subdir(self) -> None:
-        """Test that .forbidden_file_name inside a subdir is rejected."""
+    def test_03_reject_obscpio_file_in_subdir(self) -> None:
+        """Test that committing a .obscpio file in a subdir is rejected."""
         subdir = WORKING_COPY_PATH / "subdir"
         subdir.mkdir(parents=True, exist_ok=True)
-        (subdir / ".forbidden_file_name").touch()
+        (subdir / "archive.obscpio").touch()
 
-        tc_name = "add forbidden file name in a subdir"
+        tc_name = "add file with .obscpio suffix in a subdir"
         success, output = wgit_commit(
             self.repo,
             tc_name,
@@ -218,11 +219,46 @@ class TestYaPOCGitHooks(unittest.TestCase):
         )
         self.assertFalse(
             success,
-            f"Expected push rejection, but push succeeded: {output}",
+            f"Expected push rejection for .obscpio, but push succeeded: "
+            f"{output}",
         )
         self.assertEqual(self.repo.git.status("--short").strip(), "")
 
-    def test_04_allow_file_ending_with_dot_osc(self) -> None:
+    def test_04_allow_obsinfo_bak_file(self) -> None:
+        """Test that a file ending in .obsinfo.bak is accepted."""
+        (WORKING_COPY_PATH / "package.obsinfo.bak").touch()
+
+        tc_name = "add file ending in .obsinfo.bak"
+        # Positive test case: commit should succeed and remain in history
+        success, output = wgit_commit(
+            self.repo,
+            tc_name,
+            discard_prohibited=False,
+        )
+        self.assertTrue(
+            success,
+            f"Expected push to succeed, but push failed: {output}",
+        )
+        self.assertEqual(self.repo.git.status("--short").strip(), "")
+
+    def test_05_allow_obscpio_prefix_file(self) -> None:
+        """Test that a file with obscpio prefix and .py suffix is accepted."""
+        (WORKING_COPY_PATH / "obscpio_generator.py").touch()
+
+        tc_name = "add file with obscpio prefix"
+        # Positive test case: commit should succeed and remain in history
+        success, output = wgit_commit(
+            self.repo,
+            tc_name,
+            discard_prohibited=False,
+        )
+        self.assertTrue(
+            success,
+            f"Expected push to succeed, but push failed: {output}",
+        )
+        self.assertEqual(self.repo.git.status("--short").strip(), "")
+
+    def test_06_allow_file_ending_with_dot_osc(self) -> None:
         """Test that a regular file named test.osc is accepted."""
         (WORKING_COPY_PATH / "test.osc").touch()
 

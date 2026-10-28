@@ -18,7 +18,7 @@ import pygit2
 # Forbidden patterns matching blocked files or directories
 BLOCKED_PATTERNS = [
     r"(^|/)\.osc(/|$)",
-    r"\.forbidden_file_name$",
+    r"\.(?:obsinfo|obscpio)$",
 ]
 
 ZERO_COMMIT = "0000000000000000000000000000000000000000"

@@ -1,63 +1,94 @@
 #!/usr/bin/env python3
-import sys
-import subprocess
-import re
+"""Pre-receive hook implemented with subprocess shell calls to git log."""
 
-# List of forbidden file names (defined as regular expressions)
-# This example blocks exactly "secret.txt", any ".env" file, and all ".exe" files
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+
+# Forbidden patterns matching blocked files or directories
 BLOCKED_PATTERNS = [
     r"(^|/)\.osc(/|$)",
-    r"\.forbidden_file_name$"
+    r"\.(?:obsinfo|obscpio)$",
 ]
 
 ZERO_COMMIT = "0000000000000000000000000000000000000000"
 
-def get_changed_files(oldrev, newrev):
-    """Retrieves all changed or added files within the pushed commit range."""
+
+def get_changed_files(oldrev: str, newrev: str) -> list[str]:
+    """Retrieve all changed or added files within the pushed commit range."""
     if newrev == ZERO_COMMIT:
         return []  # Branch deleted
-    
+
     if oldrev == ZERO_COMMIT:
         # New branch: Compare against all other existing branches
-        cmd = ["git", "log", newrev, "--name-only", "--pretty=format:", "--not", "--all", "--not", newrev]
+        cmd = [
+            "git",
+            "log",
+            newrev,
+            "--name-only",
+            "--pretty=format:",
+            "--not",
+            "--all",
+            "--not",
+            newrev,
+        ]
     else:
         # Existing branch: Normal diff range
-        cmd = ["git", "log", f"{oldrev}..{newrev}", "--name-only", "--pretty=format:"]
-    
+        cmd = [
+            "git",
+            "log",
+            f"{oldrev}..{newrev}",
+            "--name-only",
+            "--pretty=format:",
+        ]
+
     try:
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
         # Filter out empty lines and remove duplicates using a set
-        files = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+        files = {
+            line.strip()
+            for line in result.stdout.splitlines()
+            if line.strip()
+        }
         return list(files)
     except subprocess.CalledProcessError:
         return []
 
-def main():
+
+def main() -> None:
+    """Read pushed refs from stdin and reject forbidden file patterns."""
     exit_code = 0
-    # Compile the regex patterns for better performance
     compiled_patterns = [re.compile(p) for p in BLOCKED_PATTERNS]
 
-    # Git passes old ref, new ref, and the branch name via standard input (stdin)
+    # Git passes old ref, new ref, and branch name via standard input
     for line in sys.stdin:
         parts = line.strip().split()
-        print(f"parts: {parts}")
         if len(parts) < 3:
             continue
-        oldrev, newrev, refname = parts[0], parts[1], parts[2]
-        
-        # Get changed files for this specific reference
+        oldrev, newrev, _refname = parts[0], parts[1], parts[2]
+
         changed_files = get_changed_files(oldrev, newrev)
-        print(f"changed_files: {changed_files}") 
-        # Check each file against the blocked patterns
-        for file in changed_files:
+        for file_path in changed_files:
             for pattern in compiled_patterns:
-                if pattern.search(file):
-                    # Print to stderr so the developer sees it directly in their terminal
-                    print(f"[PUSH REJECTED] The file '{file}' matches blocked pattern: {pattern.pattern}", file=sys.stderr)
+                if pattern.search(file_path):
+                    # Print to stderr for immediate developer feedback
+                    print(
+                        f"[PUSH REJECTED] The file '{file_path}' matches "
+                        f"blocked pattern: {pattern.pattern}",
+                        file=sys.stderr,
+                    )
                     exit_code = 1
 
     sys.exit(exit_code)
 
+
 if __name__ == "__main__":
     main()
-
