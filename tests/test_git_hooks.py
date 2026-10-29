@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import unittest
 
 import git
@@ -142,16 +143,29 @@ class TestYaPOCGitHooks(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        """Configure global git user identity and prepare working copy."""
-        # Ensure safe.directory and user identity are set
-        git_cmd = git.Git()
-        git_cmd.config("--global", "user.name", "Kanku User")
-        git_cmd.config("--global", "user.email", "nobody@kanku.info")
-        git_cmd.config(
-            "--global",
-            "--add",
-            "safe.directory",
-            str(GIT_TEST_REPO_PATH),
+        """Prepare working copy and configure identity locally."""
+        # Isolate Git executions from the user's global ~/.gitconfig
+        os.environ["GIT_CONFIG_GLOBAL"] = "/dev/null"
+
+        # Re-initialize target bare repository if writable to reset commits
+        if (
+            GIT_TEST_REPO_PATH.exists()
+        ):
+            if os.access(GIT_TEST_REPO_PATH, os.W_OK):
+                for item in ("refs", "objects"):
+                    target = GIT_TEST_REPO_PATH / item
+                    if target.exists():
+                        shutil.rmtree(target)
+            else:
+                apath = GIT_TEST_REPO_PATH.resolve
+                raise unittest.SkipTest(f"Target repository {apath} exists but is not writeable")
+        else:
+            GIT_TEST_REPO_PATH.mkdir(parents=True, exist_ok=True)
+
+        subprocess.run(
+            ["git", "-C", str(GIT_TEST_REPO_PATH), "init", "--bare"],
+            check=True,
+            capture_output=True,
         )
 
         # Re-create fresh working copy directory to avoid stale state
@@ -164,6 +178,11 @@ class TestYaPOCGitHooks(unittest.TestCase):
             url=str(GIT_TEST_REPO_PATH),
             to_path=str(WORKING_COPY_PATH),
         )
+
+        # Configure git identity locally inside the test repository only
+        # Never mutate developer or environment global ~/.gitconfig
+        cls.repo.git.config("user.name", "Kanku User")
+        cls.repo.git.config("user.email", "nobody@kanku.info")
 
     def test_01_reject_osc_directory(self) -> None:
         """Test that committing files inside .osc directory is rejected."""
@@ -205,7 +224,34 @@ class TestYaPOCGitHooks(unittest.TestCase):
         # Ensure working tree was cleaned after rejection
         self.assertEqual(self.repo.git.status("--short").strip(), "")
 
-    def test_03_reject_obscpio_file_in_subdir(self) -> None:
+    def test_03_allow_obsinfo_in_allowlist_exception(self) -> None:
+        """Test that file listed in _allow_files_commit is accepted."""
+        # Create _allow_files_commit with allowlist entry
+        allow_file = WORKING_COPY_PATH / "_allow_files_commit"
+        allow_file.write_text(
+            "# Exceptions from blocklist\n"
+            "allowed/package.obsinfo\n",
+            encoding="utf-8",
+        )
+
+        allowed_dir = WORKING_COPY_PATH / "allowed"
+        allowed_dir.mkdir(parents=True, exist_ok=True)
+        (allowed_dir / "package.obsinfo").touch()
+
+        tc_name = "add _allow_files_commit and allowed/package.obsinfo"
+        # Positive test case: should be accepted via _allow_files_commit
+        success, output = wgit_commit(
+            self.repo,
+            tc_name,
+            discard_prohibited=False,
+        )
+        self.assertTrue(
+            success,
+            f"Expected push to succeed for allowed exception: {output}",
+        )
+        self.assertEqual(self.repo.git.status("--short").strip(), "")
+
+    def test_04_reject_obscpio_file_in_subdir(self) -> None:
         """Test that committing a .obscpio file in a subdir is rejected."""
         subdir = WORKING_COPY_PATH / "subdir"
         subdir.mkdir(parents=True, exist_ok=True)
@@ -224,7 +270,7 @@ class TestYaPOCGitHooks(unittest.TestCase):
         )
         self.assertEqual(self.repo.git.status("--short").strip(), "")
 
-    def test_04_allow_obsinfo_bak_file(self) -> None:
+    def test_05_allow_obsinfo_bak_file(self) -> None:
         """Test that a file ending in .obsinfo.bak is accepted."""
         (WORKING_COPY_PATH / "package.obsinfo.bak").touch()
 
@@ -241,7 +287,7 @@ class TestYaPOCGitHooks(unittest.TestCase):
         )
         self.assertEqual(self.repo.git.status("--short").strip(), "")
 
-    def test_05_allow_obscpio_prefix_file(self) -> None:
+    def test_06_allow_obscpio_prefix_file(self) -> None:
         """Test that a file with obscpio prefix and .py suffix is accepted."""
         (WORKING_COPY_PATH / "obscpio_generator.py").touch()
 
@@ -258,7 +304,7 @@ class TestYaPOCGitHooks(unittest.TestCase):
         )
         self.assertEqual(self.repo.git.status("--short").strip(), "")
 
-    def test_06_allow_file_ending_with_dot_osc(self) -> None:
+    def test_07_allow_file_ending_with_dot_osc(self) -> None:
         """Test that a regular file named test.osc is accepted."""
         (WORKING_COPY_PATH / "test.osc").touch()
 

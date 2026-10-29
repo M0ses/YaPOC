@@ -1,5 +1,6 @@
 # Added by M0ses
 *.sw?
+git-hooks/pre-receive
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

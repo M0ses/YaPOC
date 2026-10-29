@@ -54,7 +54,14 @@ jobs:
       username: kanku
       commands:
         - test -d /tmp/kanku/log/ || mkdir /tmp/kanku/log/
+        - cd /tmp/kanku/git-hooks && rm -f pre-receive && ln -s pre-receive-subprocess pre-receive
+        - make -C /tmp/kanku/ test >> /tmp/kanku/log/test.log 2>&1
+        - rm -rf git; mkdir git
+        - cd /tmp/kanku/git-hooks && rm -f pre-receive && ln -s pre-receive-pygit2 pre-receive
         - make -C /tmp/kanku/ test > /tmp/kanku/log/test.log 2>&1
+        - rm -rf git; mkdir git
+        - sh -x /tmp/kanku/test.sh >> /tmp/kanku/log/test.log 2>&1
+
 
 job_groups:
   all:

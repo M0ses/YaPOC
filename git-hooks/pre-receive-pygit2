@@ -3,7 +3,8 @@
 
 This hook uses pygit2 to inspect incoming commits and trees directly
 in Python memory, eliminating subprocess overhead for git log invocations.
-It respects Git's quarantine object environment during push verification.
+It respects Git's quarantine object environment during push verification
+and supports allowlist exceptions defined in $working_copy/_allow_files_commit.
 """
 
 from __future__ import annotations
@@ -117,19 +118,59 @@ def get_empty_tree(repo: pygit2.Repository) -> pygit2.Tree:
         return repo[EMPTY_TREE_SHA1]
 
 
+def load_allow_files_commit(
+    repo: pygit2.Repository,
+    commit: pygit2.Commit,
+) -> list[str]:
+    """Read allowlist patterns from _allow_files_commit in the commit tree.
+
+    Parses the file line by line, ignoring blank lines and comments.
+    """
+    if "_allow_files_commit" not in commit.tree:
+        return []
+
+    entry = commit.tree["_allow_files_commit"]
+    try:
+        blob = repo[entry.id]
+        content = blob.data.decode("utf-8", errors="replace")
+    except Exception:
+        return []
+
+    patterns: list[str] = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        patterns.append(line)
+    return patterns
+
+
+def is_file_allowed(file_path: str, allow_patterns: list[str]) -> bool:
+    """Check if the full relative path matches an exception in allowlist."""
+    for pattern in allow_patterns:
+        if pattern == file_path:
+            return True
+        try:
+            if re.search(pattern, file_path):
+                return True
+        except re.error:
+            pass
+    return False
+
+
 def get_changed_files(
     repo: pygit2.Repository,
     oldrev: str,
     newrev: str,
-) -> set[str] | None:
-    """Retrieve all changed or added file paths in the pushed range.
+) -> tuple[pygit2.Commit | None, set[str] | None]:
+    """Retrieve the pushed commit object and all changed or added file paths.
 
-    Returns a set of file paths, or None if the incoming commit could
-    not be resolved (fail closed).
+    Returns (new_commit, changed_files_set), or (None, None) if commit
+    resolution failed (fail closed).
     """
     if newrev == ZERO_COMMIT:
         # Branch deletion; no new files introduced
-        return set()
+        return None, set()
 
     # Look up commit by direct OID from object database
     new_commit = None
@@ -146,7 +187,7 @@ def get_changed_files(
             f"[HOOK ERROR] Cannot resolve commit {newrev}",
             file=sys.stderr,
         )
-        return None
+        return None, None
 
     changed_files: set[str] = set()
     walker = repo.walk(new_commit.id, get_sort_topological())
@@ -196,7 +237,7 @@ def get_changed_files(
             if delta.status_char() != "D":
                 changed_files.add(delta.new_file.path)
 
-    return changed_files
+    return new_commit, changed_files
 
 
 def main() -> None:
@@ -212,7 +253,7 @@ def main() -> None:
             continue
         oldrev, newrev, _refname = parts[0], parts[1], parts[2]
 
-        changed_files = get_changed_files(repo, oldrev, newrev)
+        new_commit, changed_files = get_changed_files(repo, oldrev, newrev)
         # Fail closed: reject push if objects cannot be resolved
         if changed_files is None:
             print(
@@ -222,7 +263,18 @@ def main() -> None:
             exit_code = 1
             continue
 
+        # Load allowlist patterns line by line from _allow_files_commit
+        allow_patterns = (
+            load_allow_files_commit(repo, new_commit)
+            if new_commit is not None
+            else []
+        )
+
         for file_path in changed_files:
+            # Exceptions from _allow_files_commit are checked first
+            if is_file_allowed(file_path, allow_patterns):
+                continue
+
             for pattern in compiled_patterns:
                 if pattern.search(file_path):
                     # Output error directly to stderr for developer feedback
