@@ -16,6 +16,15 @@ We started with python implementation because of good knowledge/skills across ou
 This makes it easier for us to review code and architecture and write our own code.
 Go implementations can hopefully generated easily by AI.
 
+## Current implementation details
+
+* Reject files matching the following patterns
+  * `.osc`
+  * `*.obsinfo`
+  * `*.obscpio`
+* Allow exceptions for files list in `_allow_files_commit`
+
+
 ## How to start
 
 With the following command 
