@@ -157,8 +157,10 @@ class TestYaPOCGitHooks(unittest.TestCase):
                     if target.exists():
                         shutil.rmtree(target)
             else:
-                apath = GIT_TEST_REPO_PATH.resolve
-                raise unittest.SkipTest(f"Target repository {apath} exists but is not writeable")
+                apath = GIT_TEST_REPO_PATH.resolve()
+                raise unittest.SkipTest(
+                    f"Target repository {apath} exists but is not writeable"
+                )
         else:
             GIT_TEST_REPO_PATH.mkdir(parents=True, exist_ok=True)
 
